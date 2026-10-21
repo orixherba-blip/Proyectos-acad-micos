@@ -1,0 +1,282 @@
+"""Programa financiero de CETES a 28 días.
+
+Consulta información publicada por BANXICO a través de su API SIE, calcula el
+monto y el interés generado por una inversión en CETES a 28 días bajo interés
+simple y envía el reporte resultante por correo electrónico usando Gmail.
+
+Variables de entorno requeridas (archivo ``.env``):
+    token_BANXICO: Token de acceso a la API SIE de BANXICO.
+    gmail_remitente: Cuenta de Gmail desde la que se envía el reporte.
+    Contraseña: Contraseña de aplicación de la cuenta de Gmail.
+
+Variables globales:
+    opción (int): Valor inicial de la opción del menú (no se utiliza).
+    continuar_programa (bool): Controla el ciclo principal del menú.
+    tiempo (int): Número de periodos de 28 días de la inversión.
+    cápital (float): Variable inicial sin uso (ver ``capital`` en el menú).
+    destinatario (str): Correo al que se enviará el reporte.
+    asunto (str): Asunto del correo.
+
+Ejemplo:
+    $ python calculadora_cetes.py
+"""
+
+# ---------------------------------------------------------------------------
+# Variables globales
+# ---------------------------------------------------------------------------
+opción = 0
+continuar_programa = True
+tiempo = 0
+cápital = 0.0
+destinatario = ""
+asunto = ""
+
+# ---------------------------------------------------------------------------
+# Importaciones
+# ---------------------------------------------------------------------------
+import requests
+import smtplib
+import os
+from dotenv import load_dotenv
+from email.message import EmailMessage
+load_dotenv ()  # Carga las variables definidas en el archivo .env
+
+
+# ---------------------------------------------------------------------------
+# Consultas a BANXICO
+# ---------------------------------------------------------------------------
+def obtener_tasa_de_interés ()->float:
+    """Obtiene la tasa de interés más reciente de CETES a 28 días.
+
+    Consulta en la API SIE de BANXICO la serie ``SF4830`` (CETES a 28 días),
+    toma el último dato de la serie histórica y lo convierte de porcentaje a
+    su forma decimal (por ejemplo, 7.5 se convierte en 0.075).
+
+    Returns:
+        float: Tasa de interés en forma decimal. Si la consulta falla
+        (código HTTP distinto de 200), se imprime el error y se devuelve 0.
+
+    Note:
+        Requiere la variable de entorno ``token_BANXICO``.
+    """
+    tasa_de_interes = 0
+    PORCENTAJE = 100  # Factor para convertir porcentaje a decimal
+    id_consulta_cetes28días = "SF4830"
+    token = os.getenv("token_BANXICO")
+    header = { "Accept":"application/json","Bmx-token": token}
+    url = f"https://www.banxico.org.mx/SieAPIRest/service/v1/series/{id_consulta_cetes28días}/datos"
+    consulta_cetes28días = requests.get (url,headers=header)
+    if consulta_cetes28días.status_code == 200:
+        datos_consulta_cetes28días= consulta_cetes28días.json ()
+        # El último elemento de la lista de datos es el más reciente
+        interés_cetes28días_bruto = datos_consulta_cetes28días['bmx']['series'][0]['datos'][-1]['dato']
+        interés_cetes28días = float(interés_cetes28días_bruto)
+        tasa_de_interes = (interés_cetes28días)/PORCENTAJE
+    else:
+       print (f"ERROR:{consulta_cetes28días.status_code} - {consulta_cetes28días.text}")
+    return tasa_de_interes
+
+
+def consulta_BANXICO ()->str :
+    """Imprime la descripción de la serie de CETES consultada en BANXICO.
+
+    Consulta la serie ``SF43695`` y muestra en pantalla su título, el rango
+    de fechas disponible y la unidad de medida de los datos.
+
+    Returns:
+        str: Cadena ``"None"`` cuando la consulta es exitosa, ya que el
+        resultado de ``print`` se convierte a texto con ``str``. Si la
+        consulta falla, se imprime el error y se devuelve una cadena vacía.
+
+    Note:
+        Requiere la variable de entorno ``token_BANXICO``.
+    """
+    respuesta_consulta = ""
+    id_consulta_CETES = "SF43695"
+    token = os.getenv("token_BANXICO")
+    header = { "Accept":"application/json","Bmx-token": token}
+    url = f"https://www.banxico.org.mx/SieAPIRest/service/v1/series/{id_consulta_CETES}"
+    consulta = requests.get (url,headers=header)
+    if consulta.status_code == 200:
+        datos_consulta =  consulta.json ()
+        titulo = datos_consulta['bmx']['series'][0]['titulo']
+        fecha_inicio = datos_consulta['bmx']['series'][0]['fechaInicio']
+        fechaFin =datos_consulta['bmx']['series'][0]['fechaFin']
+        unidad = datos_consulta['bmx']['series'][0]['unidad']
+        respuesta_consulta = str(print(f"La {titulo} acorde a los datos obtenidos por BANXICO desde {fecha_inicio} hasta el {fechaFin} con una periodicidad diaria, obtenida en saldos nos indican las siguientes unidades: {unidad}"))
+    else:
+        print (f"ERROR:{consulta.status_code} - {consulta.text}")
+    return respuesta_consulta
+
+
+# ---------------------------------------------------------------------------
+# Cálculos financieros
+# ---------------------------------------------------------------------------
+def calculo_monto (capital,tiempo)->float:
+    """Calcula el monto final de una inversión bajo interés simple.
+
+    Fórmula: ``M = C * (1 + i * t)``
+
+    Args:
+        capital (float): Cantidad de dinero invertida.
+        tiempo (int): Número de periodos de la inversión.
+
+    Returns:
+        float: Monto total (capital más intereses), utilizando la tasa
+        obtenida con :func:`obtener_tasa_de_interés`.
+    """
+    monto = 0.0
+    tasa_de_interés = obtener_tasa_de_interés()
+    monto = capital*(1+(tasa_de_interés*tiempo))
+    return monto
+
+
+def calculo_interés_generado (capital, tiempo)->float:
+    """Calcula el interés generado por una inversión bajo interés simple.
+
+    Fórmula: ``I = C * (t * i)``
+
+    Args:
+        capital (float): Cantidad de dinero invertida.
+        tiempo (int): Número de periodos de la inversión.
+
+    Returns:
+        float: Interés total generado, utilizando la tasa obtenida con
+        :func:`obtener_tasa_de_interés`.
+    """
+    interes_generado = 0
+    tasa_de_interés = obtener_tasa_de_interés()
+    interes_generado = capital*(tiempo*tasa_de_interés)
+    return interes_generado
+
+
+# ---------------------------------------------------------------------------
+# Reporte y envío de correo
+# ---------------------------------------------------------------------------
+def reporte (capital,tiempo)->str:
+    """Genera el texto del reporte de la inversión.
+
+    Calcula el interés generado y el monto total, y los integra en un
+    mensaje descriptivo.
+
+    Args:
+        capital (float): Cantidad de dinero invertida.
+        tiempo (int): Número de periodos de 28 días.
+
+    Returns:
+        str: Texto del reporte con el capital, los periodos, la ganancia y
+        el monto total.
+
+    Note:
+        Cada cálculo consulta la tasa de BANXICO por separado, por lo que
+        esta función realiza dos consultas a la API.
+    """
+    intereses = calculo_interés_generado (capital, tiempo)
+    monto = calculo_monto (capital,tiempo)
+    reporte_cuerpo = (f"Con base a la inversión indicada: ${capital}.00, y la cantidad de periódos: {tiempo}, basándonos en la tasa de interés del CETES a 28 días consultada en BANXICO se obtendría una ganancia de: ${intereses}.00, produciendo un monto total de: ${monto}.00")
+    return reporte_cuerpo
+
+
+def enviar_correo_gmail(destinatario,asunto):
+    """Envía el reporte de la inversión por correo mediante Gmail.
+
+    Se conecta a ``smtp.gmail.com`` por el puerto 465 (SSL), se autentica
+    con las credenciales del entorno y envía un correo de texto plano cuyo
+    cuerpo es el resultado de :func:`reporte`.
+
+    Args:
+        destinatario (str): Dirección de correo que recibirá el reporte.
+        asunto (str): Asunto del correo.
+
+    Returns:
+        bool: ``True`` si el correo se envió correctamente; ``False`` si la
+        autenticación no fue válida o si ocurrió un error al conectar o
+        enviar.
+
+    Raises:
+        ValueError: Si faltan las variables de entorno ``gmail_remitente``
+            o ``Contraseña``.
+
+    Note:
+        El cuerpo se construye con las variables globales ``capital`` y
+        ``tiempo``. Las dos últimas líneas de la función quedan después de
+        un ``return`` en todos los caminos, por lo que nunca se ejecutan.
+    """
+    cuerpo = reporte(capital,tiempo)
+    servidor="smtp.gmail.com"
+    puerto=465
+    remitente = os.getenv("gmail_remitente")
+    contraseña= os.getenv("Contraseña")
+    if not remitente or not contraseña:
+        raise ValueError("Faltan variables de entorno: revisa la ruta del .env y los nombres.")
+    try:
+            with smtplib.SMTP_SSL(servidor, puerto) as smtp:
+                codigo, respuesta = smtp.login(user=remitente,password=contraseña)
+
+                # 235 = el servidor confirma que la autenticación fue correcta
+                if codigo == 235:
+                    # --- Estructura del correo ---
+                    mensaje = EmailMessage()
+                    mensaje["From"] = remitente        # Remitente
+                    mensaje["To"] = destinatario       # Destinatario
+                    mensaje["Subject"] = asunto        # Asunto
+                    mensaje.set_content(cuerpo)        # Cuerpo (texto plano)
+
+                    smtp.send_message(mensaje)
+                    print("Correo enviado correctamente.")
+                    return True
+                else:
+                    print(f"Conexión no válida: {codigo} {respuesta}")
+                    return False
+    except smtplib.SMTPAuthenticationError:
+        print("Error de autenticación: revisa el correo o la contraseña de aplicación.")
+        return False
+    except Exception as error:
+        print(f"Error al conectar o enviar: {error}")
+        return False
+    RESPUESTA = print(f"Se ha enviado el resporte con éxito al siguiente correo: {destinatario}")
+    return RESPUESTA
+
+
+# ---------------------------------------------------------------------------
+# Programa principal (menú interactivo)
+# ---------------------------------------------------------------------------
+continuar_programa = True
+
+# Ciclo principal: muestra el menú hasta que el usuario elige la opción 3
+while continuar_programa:
+    print("Bienvenido al programa financiero")
+    print("A continuación le presentamos las siguientes opciones")
+    print("1. Consultar la tasa de financiación gubernamental (tasa de interés promedio ponderada, % anual)")
+    print("2. Calcular el monto generado por los CETES a 28 días bajo interés simple")
+    print("3. Salir")
+    opcion = input("Ingrese el número de la opción deseada: ").strip()
+
+    # Opción 1: consultar información de la serie de CETES en BANXICO
+    if opcion == "1":
+        consulta_BANXICO()
+
+    # Opción 2: solicitar datos, calcular la inversión y enviar el reporte
+    elif opcion == "2":
+        print("Ingresa los datos solicitados. Periodos: números enteros. Capital: si usas decimales, usa punto (.)")
+        try:
+            tiempo = int(input("¿Por cuántos periodos de 28 días vas a proyectar tu inversión? "))
+            capital = float(input("¿Cuál es la cantidad de dinero que invertirás? "))
+        except ValueError as v:
+            print(f"ERROR: {v}. Vuelve a elegir la opción e ingresa los datos de nuevo.")
+            continue  # Regresa al menú si los datos no son válidos
+        monto = calculo_monto(capital, tiempo)
+        interes = calculo_interés_generado(capital, monto)
+        texto_reporte = reporte(capital, tiempo)
+        destinatario = input("Ingrese el correo electrónico al que enviará el reporte: ").lower().strip()
+        asunto = input("En unas pocas palabras indique el asunto del correo: ")
+        enviar_correo_gmail(destinatario,asunto)
+
+    # Opción 3: salir del programa
+    elif opcion == "3":
+        print("Saliendo del programa")
+        continuar_programa = False
+
+    # Cualquier otra entrada no es válida
+    else:
+        print("Opción no válida, intenta de nuevo.")
