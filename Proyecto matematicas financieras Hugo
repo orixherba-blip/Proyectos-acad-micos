@@ -1,0 +1,468 @@
+# Programa de python para consultar Banxico y realizar operaciones con la informacion requerida
+"""
+Autor: Hugo Irvig Sanchez Filomeno
+Objetivo:
+Obtener el interes simple con tasa de cetes a 28 dias 
+haciendo requests de banxico
+consultar series de banxico en datos oportunos y datos historicos
+enviando por email el reporte de resultados si el usuario lo decide
+Version extendida SMS o Whatsapp solo si conecta el email 
+"""
+import os 
+import re
+import requests
+import time as t 
+from datetime import datetime
+from email.message import EmailMessage
+from smtplib import SMTP, SMTPAuthenticationError, SMTPException  
+from dotenv import load_dotenv
+
+load_dotenv()
+
+"""
+funcion 1 conexion a banxico y comprobacion de conectividad por status 
+funcion 2 lectura de la respuesta de banxico (serie, titulo y datos) 
+funcion 3 consulta de una serie en datos oportunos (tiempo real) 
+funcion 4 consulta de una serie en datos historicos (rango de fechas) 
+funcion 5 calculo del interes simple con la tasa de cetes 
+funcion 6 generacion del reporte de una consulta de banxico 
+funcion 7 generacion del reporte del interes simple 
+funcion 8 envio del reporte por email 
+funcion 9 pregunta si se envia el reporte y pide el correo destino 
+funcion 10 conversion de datos de banxico a numero 
+funcion 11 captura de numeros validos para el usuario 
+funcion 12 captura del rango de fechas para datos historicos 
+funcion 13 menu para elegir la serie a consultar 
+funcion 14 menu de consultas de banxico (oportunos e historicos) 
+funcion 15 flujo completo del calculo del ISC 
+"""
+
+# Constantes que se llaman del archivo .env
+TOKEN = os.getenv("TOKEN_BANXICO") 
+EMAIL = os.getenv("EMAIL")
+USERMAIL = os.getenv("USERMAIL")
+PASSWORD = os.getenv("PASSWORD")
+PORTMAIL = int(os.getenv("PORTMAIL") or 587)
+SERVERMAIL = os.getenv("SERVERMAIL")
+URL_BANXICO = os.getenv("URL_BANXICO")
+SERIE_CETES28 = os.getenv("SERIE_CETES28")
+DATOS_HISTORICOS_MOSTRAR = int(os.getenv("DATOS_HISTORICOS_MOSTRAR") or 15)
+DELAY_REPORTE = float(os.getenv("DELAY_REPORTE") or 3)
+DELAY_SALIR = float(os.getenv("DELAY_SALIR") or 5)
+
+# Series de banxico disponibles en el menu de consultas (la clave de cada serie viene del .env)
+SERIES = {
+    1: {"nombre": "Tipo de cambio FIX", "variable": "SERIE_FIX", "serie": os.getenv("SERIE_FIX")},
+    2: {"nombre": "Tasa objetivo de Banxico", "variable": "SERIE_TASA_OBJETIVO", "serie": os.getenv("SERIE_TASA_OBJETIVO")},
+    3: {"nombre": "TIIE a 28 dias", "variable": "SERIE_TIIE28", "serie": os.getenv("SERIE_TIIE28")},
+    4: {"nombre": "TIIE a 91 dias", "variable": "SERIE_TIIE91", "serie": os.getenv("SERIE_TIIE91")},
+    5: {"nombre": "Cetes a 28 dias", "variable": "SERIE_CETES28", "serie": os.getenv("SERIE_CETES28")},
+    6: {"nombre": "UDIS", "variable": "SERIE_UDIS", "serie": os.getenv("SERIE_UDIS")},
+    7: {"nombre": "INPC", "variable": "SERIE_INPC", "serie": os.getenv("SERIE_INPC")},
+    8: {"nombre": "Reservas internacionales", "variable": "SERIE_RESERVAS", "serie": os.getenv("SERIE_RESERVAS")},
+}
+
+
+def conexion_banxico(ruta: str):
+    """
+    Funcion 1: se conecta a banxico y comprueba la conectividad con el status
+    Recibe la ruta que va despues de la url (serie y tipo de dato)
+    Regresa la respuesta (response) si el status es 200, si no regresa None
+    """
+    headers = {"Bmx-Token": TOKEN}
+    enlace = f"{URL_BANXICO}/{ruta}"
+    try:
+        response = requests.get(url=enlace, headers=headers, timeout=10)
+    except requests.exceptions.ConnectionError:
+        print("No hay conexion a internet o a banxico")
+        return None
+    except requests.exceptions.Timeout:
+        print("Banxico tardo demasiado en responder")
+        return None
+    except requests.exceptions.RequestException as error:
+        print(f"Error al hacer el request: {error}")
+        return None
+
+    print(f"Status de la conexion: {response.status_code}")
+    if response.status_code == 200:
+        return response
+    elif response.status_code == 404:
+        print("No se encontro la serie o no hay datos para esa consulta")
+    elif response.status_code in (401, 403):
+        print("Token invalido, revisa TOKEN_BANXICO en el archivo .env")
+    else:
+        print("Banxico respondio con un error")
+    return None
+
+
+def leer_respuesta(response, serie: str):
+    """
+    Funcion 2: lee la respuesta de banxico
+    Recibe la respuesta (response) y la clave de la serie
+    Regresa un diccionario con serie, titulo y datos (lista de fecha y dato)
+    Si algo falla o no hay datos regresa None
+    """
+    try:
+        info = response.json()["bmx"]["series"][0]
+        datos = info.get("datos")
+        if not datos:
+            print("Banxico no tiene datos para esa consulta")
+            return None
+        return {"serie": serie, "titulo": info["titulo"], "datos": datos}
+    except (ValueError, KeyError, IndexError):
+        print("La respuesta de banxico no tiene el formato esperado")
+        return None
+
+
+def consultar_oportuno(serie: str):
+    """
+    Funcion 3: consulta una serie de banxico en tiempo real (dato oportuno)
+    Recibe la clave de la serie
+    Regresa un diccionario con serie, titulo y datos (con un solo dato)
+    Si algo falla regresa None
+    """
+    response = conexion_banxico(f"{serie}/datos/oportuno")
+    if response is None:
+        return None
+    return leer_respuesta(response, serie)
+
+
+def consultar_historico(serie: str, fecha_ini: datetime, fecha_fin: datetime):
+    """
+    Funcion 4: consulta una serie de banxico en un rango de fechas (datos historicos)
+    Recibe la clave de la serie y las fechas inicial y final (datetime)
+    Regresa un diccionario con serie, titulo y datos (todos los del rango)
+    Si algo falla regresa None
+    """
+    ini = fecha_ini.strftime("%Y-%m-%d")
+    fin = fecha_fin.strftime("%Y-%m-%d")
+    response = conexion_banxico(f"{serie}/datos/{ini}/{fin}")
+    if response is None:
+        return None
+    return leer_respuesta(response, serie)
+
+
+def calcular_isc(capital: float, tasa_anual: float, dias: float) -> float:
+    """
+    Funcion 5: formula del interes simple con la tasa de cetes
+    I = C * i * t
+    C = capital
+    i = tasa anual en decimal (tasa / 100)
+    t = tiempo en anios (dias / 360)
+    Regresa el interes ganado
+    """
+    return capital * (tasa_anual / 100) * (dias / 360)
+
+
+def generar_reporte_consulta(consulta: dict, tipo: str, rango=None, limite=None) -> str:
+    """
+    Funcion 6: genera el reporte de una consulta de banxico
+    Recibe la consulta, el tipo (datos oportunos o datos historicos),
+    el rango de fechas (solo historicos) y el limite de datos a mostrar (None = todos)
+    Regresa el reporte en texto listo para imprimir o enviar por email
+    """
+    ahora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    datos = consulta["datos"]
+    lineas = [
+        f"=== Reporte de Consulta Banxico ({tipo}) ===",
+        f"Fecha del reporte: {ahora}",
+        f"Consulta: {consulta['nombre']}",
+        f"Serie: {consulta['serie']}",
+        f"Descripcion: {consulta['titulo']}",
+    ]
+    if tipo == "datos oportunos":
+        lineas.append(f"Fecha del dato: {datos[0]['fecha']}")
+        lineas.append(f"Dato: {datos[0]['dato']}")
+    else:
+        lineas.append(f"Periodo: {rango[0]} al {rango[1]}")
+        lineas.append(f"Total de datos: {len(datos)}")
+        valores = [a_numero(d["dato"]) for d in datos]
+        valores = [v for v in valores if v is not None]
+        if valores:
+            lineas.append(f"Minimo: {min(valores):,.4f}")
+            lineas.append(f"Maximo: {max(valores):,.4f}")
+            lineas.append(f"Promedio: {sum(valores) / len(valores):,.4f}")
+        mostrados = datos if limite is None else datos[-limite:]
+        lineas.append("")
+        if limite is not None and len(datos) > limite:
+            lineas.append(f"Ultimos {limite} datos del periodo:")
+        else:
+            lineas.append("Datos del periodo:")
+        for d in mostrados:
+            lineas.append(f"{d['fecha']}: {d['dato']}")
+    return "\n".join(lineas) + "\n"
+
+
+def generar_reporte_isc(consulta: dict, tasa: float, capital: float, dias: float, interes: float) -> str:
+    """
+    Funcion 7: genera el reporte del interes simple
+    Recibe la consulta de cetes, la tasa, el capital, los dias y el interes
+    Regresa el reporte en texto listo para imprimir o enviar por email
+    """
+    monto_final = capital + interes
+    ahora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    reporte = (
+        "=== Reporte de Interes Simple (ISC) ===\n"
+        f"Fecha del reporte: {ahora}\n"
+        f"Serie consultada: {consulta['serie']}\n"
+        f"Descripcion: {consulta['titulo']}\n"
+        f"Fecha del dato: {consulta['datos'][0]['fecha']}\n"
+        f"Tasa anual de cetes a 28 dias: {tasa} %\n"
+        f"Capital: ${capital:,.2f}\n"
+        f"Plazo: {dias:g} dias\n"
+        "Formula: I = C * i * t\n"
+        f"Interes simple: ${interes:,.2f}\n"
+        f"Monto final: ${monto_final:,.2f}\n"
+    )
+    return reporte
+
+
+def enviar_email(destinatario: str, asunto: str, reporte: str) -> bool:
+    """
+    Funcion 8: envia el reporte por email con las claves del archivo .env
+    Recibe el correo destino, el asunto y el texto del reporte
+    Regresa True si se envio, False si hubo algun error
+    """
+    if not (EMAIL and PASSWORD and SERVERMAIL):
+        print("Faltan EMAIL, PASSWORD o SERVERMAIL en el archivo .env")
+        return False
+
+    mensaje = EmailMessage()
+    mensaje["Subject"] = asunto
+    mensaje["From"] = f"{USERMAIL} <{EMAIL}>"
+    mensaje["To"] = destinatario
+    mensaje.set_content(reporte)
+
+    try:
+        with SMTP(SERVERMAIL, PORTMAIL, timeout=30) as servidor:
+            servidor.starttls()
+            servidor.login(EMAIL, PASSWORD)
+            servidor.send_message(mensaje)
+        return True
+    except SMTPAuthenticationError:
+        print("Usuario o password incorrectos (en gmail se usa contrasena de aplicacion)")
+    except SMTPException as error:
+        print(f"Error de SMTP al enviar el correo: {error}")
+    except OSError as error:
+        print(f"No se pudo conectar al servidor de correo: {error}")
+    return False
+
+
+def ofrecer_envio(asunto: str, reporte: str):
+    """
+    Funcion 9: pregunta al usuario si quiere enviar el reporte por email
+    Si dice que si, pide el correo destino, espera el delay y envia el reporte
+    Recibe el asunto y el reporte completo
+    """
+    while True:
+        respuesta = input("Deseas enviar el reporte por email? (S/N): ").strip().upper()
+        if respuesta in ("S", "SI", "N", "NO"):
+            break
+        print("Escribe S para si o N para no")
+    if respuesta in ("N", "NO"):
+        print("Reporte no enviado\n")
+        return
+
+    while True:
+        destinatario = input("Escribe el correo destino (o escribe cancelar): ").strip()
+        if destinatario.lower() == "cancelar":
+            print("Reporte no enviado\n")
+            return
+        if re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", destinatario):
+            break
+        print("El correo no es valido")
+
+    print("Enviando el reporte por email, espera un momento...")
+    t.sleep(DELAY_REPORTE)
+    if enviar_email(destinatario, asunto, reporte):
+        print(f"Reporte enviado a {destinatario}\n")
+    else:
+        print("No se pudo enviar el reporte\n")
+
+
+def a_numero(texto):
+    """
+    Funcion 10: convierte un dato de banxico a numero (quita las comas de miles)
+    Recibe el dato en texto
+    Regresa el numero como float o None si no es un numero (por ejemplo N/E)
+    """
+    try:
+        return float(str(texto).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def pedir_numero(mensaje: str, minimo: float = 0) -> float:
+    """
+    Funcion 11: pide un numero al usuario y repite la pregunta hasta que sea valido
+    Recibe el mensaje a mostrar y el minimo (el numero debe ser mayor a el)
+    Regresa el numero como float
+    """
+    while True:
+        try:
+            numero = float(input(mensaje))
+            if numero > minimo:
+                return numero
+            print(f"El numero debe ser mayor a {minimo}")
+        except ValueError:
+            print("Escribe solo numeros")
+
+
+def pedir_rango_fechas():
+    """
+    Funcion 12: pide la fecha inicial y la final en formato dd/mm/aaaa
+    Repite la pregunta hasta que las fechas sean validas y la inicial no sea mayor a la final
+    Regresa las dos fechas como datetime
+    """
+    while True:
+        try:
+            fecha_ini = datetime.strptime(input("Fecha inicial (dd/mm/aaaa): ").strip(), "%d/%m/%Y")
+            fecha_fin = datetime.strptime(input("Fecha final (dd/mm/aaaa): ").strip(), "%d/%m/%Y")
+        except ValueError:
+            print("Fecha invalida, usa el formato dd/mm/aaaa")
+            continue
+        if fecha_ini > fecha_fin:
+            print("La fecha inicial no puede ser mayor a la final")
+            continue
+        return fecha_ini, fecha_fin
+
+
+def elegir_serie():
+    """
+    Funcion 13: muestra el menu de series y pide una opcion
+    Regresa el diccionario de la serie elegida o None si el usuario regresa
+    """
+    print("\nElige la consulta:")
+    for numero, info in SERIES.items():
+        print(f"{numero} {info['nombre']}")
+    print("0 Regresar")
+    while True:
+        try:
+            opcion = int(input())
+        except ValueError:
+            print("Debes seleccionar una opcion.")
+            continue
+        if opcion == 0:
+            return None
+        if opcion in SERIES:
+            return SERIES[opcion]
+        print("Debes seleccionar una opcion.")
+
+
+def menu_consultas():
+    """
+    Funcion 14: menu de consultas de banxico
+    Permite elegir datos oportunos o datos historicos y despues la serie
+    Al terminar cada consulta ofrece enviar el reporte por email
+    """
+    while True:
+        print("\nConsulta Banxico")
+        print("1 Datos oportunos (ultimo dato publicado)")
+        print("2 Datos historicos (rango de fechas)")
+        print("3 Regresar al menu")
+        try:
+            opcionConsulta = int(input())
+        except ValueError:
+            print("Debes seleccionar una opcion.")
+            continue
+
+        # Datos oportunos
+        if opcionConsulta == 1:
+            info = elegir_serie()
+            if info is None:
+                continue
+            consulta = consultar_oportuno(info["serie"])
+            if consulta is None:
+                continue
+            consulta["nombre"] = info["nombre"]
+            reporte = generar_reporte_consulta(consulta, "datos oportunos")
+            print("\n" + reporte)
+            ofrecer_envio(f"Reporte Banxico: {info['nombre']} (datos oportunos)", reporte)
+
+        # Datos historicos
+        elif opcionConsulta == 2:
+            info = elegir_serie()
+            if info is None:
+                continue
+            fecha_ini, fecha_fin = pedir_rango_fechas()
+            consulta = consultar_historico(info["serie"], fecha_ini, fecha_fin)
+            if consulta is None:
+                continue
+            consulta["nombre"] = info["nombre"]
+            rango = (fecha_ini.strftime("%d/%m/%Y"), fecha_fin.strftime("%d/%m/%Y"))
+            # En pantalla solo los ultimos datos, en el email todos
+            print("\n" + generar_reporte_consulta(consulta, "datos historicos", rango, DATOS_HISTORICOS_MOSTRAR))
+            reporte = generar_reporte_consulta(consulta, "datos historicos", rango)
+            ofrecer_envio(f"Reporte Banxico: {info['nombre']} (datos historicos)", reporte)
+
+        elif opcionConsulta == 3:
+            break
+
+        else:
+            print("Debes seleccionar una opcion.")
+
+
+def flujo_isc():
+    """
+    Funcion 15: flujo completo del calculo del ISC
+    Pide capital y plazo, consulta la tasa de cetes a 28 dias, resuelve la formula,
+    genera el reporte y ofrece enviarlo por email
+    """
+    print("Bienvenido a Calculo de ISC")
+    print("Formula: I = C * i * t")
+    capital = pedir_numero("Escribe el capital: ")
+    dias = pedir_numero("Escribe el plazo en dias: ")
+
+    # Consulta la serie adecuada (cetes a 28 dias)
+    consulta = consultar_oportuno(SERIE_CETES28)
+    if consulta is None:
+        print("No se pudo obtener la tasa de cetes, intenta mas tarde\n")
+        return
+    tasa = a_numero(consulta["datos"][0]["dato"])
+    if tasa is None:
+        print("Banxico no tiene un dato disponible para la serie\n")
+        return
+
+    # Resuelve la formula y genera el reporte
+    interes = calcular_isc(capital, tasa, dias)
+    reporte = generar_reporte_isc(consulta, tasa, capital, dias, interes)
+    print("\n" + reporte)
+    ofrecer_envio("Reporte ISC con tasa de Cetes a 28 dias", reporte)
+
+
+# Revisa que las constantes necesarias se hayan cargado del archivo .env
+faltantes = [nombre for nombre, valor in (("TOKEN_BANXICO", TOKEN), ("URL_BANXICO", URL_BANXICO)) if not valor]
+faltantes += [info["variable"] for info in SERIES.values() if not info["serie"]]
+if faltantes:
+    raise SystemExit("Faltan estas constantes en el archivo .env: " + ", ".join(faltantes))
+
+while True:
+    print("Bienvenido")
+    print("Selecciona una opcion: \n")
+    print("1 Consulta Banxico (datos oportunos e historicos) ")
+    print("2 Calculo de ISC ")
+    print("3 Salir ")
+    try:
+        opcionMenu = int(input())
+    except ValueError:
+        print("Debes seleccionar una opcion.")
+        continue
+
+    # Opcion 1: consultar series de Banxico (oportunos e historicos)
+    if opcionMenu == 1:
+        menu_consultas()
+
+    # Opcion 2: Calcular el ISC 
+    elif opcionMenu == 2:
+        flujo_isc()
+
+# Salir del Programa    
+    elif opcionMenu == 3:
+        print(" Gracias por tu tiempo")
+        t.sleep(DELAY_SALIR)
+        break
+
+    else:
+        print("Debes seleccionar una opcion.")
+
+print("Ya saliste del programa") 
